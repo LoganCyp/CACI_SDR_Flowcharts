@@ -8,14 +8,8 @@ import io
 import pmt
 from PyQt5 import Qt
 from PyQt5.QtCore import pyqtSignal, QObject
-from gnuradio import qtgui, analog, blocks, digital, gr, uhd, pdu
-from gnuradio.filter import firdes  # Corrected import
-
-# Support for sip handling within PyQt5
-try:
-    from PyQt5 import sip
-except ImportError:
-    import sip
+from gnuradio import analog, blocks, digital, gr, uhd, pdu
+from gnuradio.filter import firdes  #
 
 # Attempt to import PIL for image validation
 try:
@@ -41,8 +35,8 @@ class ImageRecoveryBlock(gr.basic_block):
         self.proxy = SignalProxy()
 
     def _handle(self, msg):
-        vec = pmt.cdr(msg)
-        data = bytes(pmt.u8vector_elements(vec))
+        vec = pmt.cdr(msg)  #
+        data = bytes(pmt.u8vector_elements(vec))  #
         self.buf.extend(data)
 
         s = self.buf.find(JPEG_START)
@@ -52,13 +46,13 @@ class ImageRecoveryBlock(gr.basic_block):
 
         jpg = bytes(self.buf[s:e+2])
 
-        if self._valid_jpeg(jpg):
+        if self._valid_jpeg(jpg):  #
             with open(self.out_jpg, "wb") as f:
                 f.write(jpg)
             self.proxy.image_received.emit(self.out_jpg)
             self.buf = self.buf[e+2:]
         else:
-            del self.buf[:s+2]
+            del self.buf[:s+2]  #
 
     def _valid_jpeg(self, b):
         if len(b) < 100: return False
@@ -74,8 +68,8 @@ class caci_rtl_rx(gr.top_block, Qt.QWidget):
     def __init__(self):
         gr.top_block.__init__(self, "SDR Image Receiver", catch_exceptions=True)
         Qt.QWidget.__init__(self)
-        self.setWindowTitle("SDR Image Receiver - Continuous Mode")
-        self.resize(1100, 700)
+        self.setWindowTitle("SDR Image Receiver")
+        self.resize(800, 600)
 
         self.top_layout = Qt.QVBoxLayout(self)
         self.top_grid_layout = Qt.QGridLayout()
@@ -89,22 +83,17 @@ class caci_rtl_rx(gr.top_block, Qt.QWidget):
         self.access_code = '11100001010110101110100010010011'
 
         # --- GUI Section ---
-        # Image Display
+        # Image Display Label
         self.image_label = Qt.QLabel("Awaiting Image...")
         self.image_label.setAlignment(Qt.Qt.AlignCenter)
         self.image_label.setStyleSheet("""
             font-size: 24px; color: #555; border: 3px dashed #bbb; 
             background: #f0f0f0; border-radius: 10px;
         """)
+        # Occupies the top row
         self.top_grid_layout.addWidget(self.image_label, 0, 0, 1, 2)
 
-        # Constellation Sink
-        self.qtgui_const_sink_x_0 = qtgui.const_sink_c(1024, "Receiver Constellation", 1)
-        self.qtgui_const_sink_x_0.set_update_time(0.10)
-        self.const_widget = sip.wrapinstance(self.qtgui_const_sink_x_0.qwidget(), Qt.QWidget)
-        self.top_grid_layout.addWidget(self.const_widget, 1, 1)
-
-        # Gain Slider
+        # Gain Control UI
         self.gain_label = Qt.QLabel(f"<b>USRP Gain:</b> {self.gain} dB")
         self.top_grid_layout.addWidget(self.gain_label, 1, 0)
         
@@ -112,7 +101,7 @@ class caci_rtl_rx(gr.top_block, Qt.QWidget):
         self.gain_slider.setRange(0, 90)
         self.gain_slider.setValue(int(self.gain))
         self.gain_slider.valueChanged.connect(self.set_usrp_gain)
-        self.top_grid_layout.addWidget(self.gain_slider, 2, 0)
+        self.top_grid_layout.addWidget(self.gain_slider, 1, 1)
 
         # --- SDR Blocks ---
         self.uhd_source = uhd.usrp_source(
@@ -125,11 +114,8 @@ class caci_rtl_rx(gr.top_block, Qt.QWidget):
 
         self.agc = analog.agc_cc(1e-4, 1.0, 1.0, 4000)
         self.fll = digital.fll_band_edge_cc(self.sps, 0.35, 45, 0.05)
-        
-        # Corrected usage of firdes
         self.clock_sync = digital.pfb_clock_sync_ccf(self.sps, 0.0628, 
-            firdes.root_raised_cosine(32, 32, 1.0, 0.35, 11*32), 32, 16, 1.5, 1)
-            
+            firdes.root_raised_cosine(32, 32, 1.0, 0.35, 11*32), 32, 16, 1.5, 1) #
         self.costas = digital.costas_loop_cc(0.05, 2, False)
         self.decoder = digital.constellation_decoder_cb(digital.constellation_bpsk().base())
         self.diff_dec = digital.diff_decoder_bb(2, digital.DIFF_DIFFERENTIAL)
@@ -146,7 +132,6 @@ class caci_rtl_rx(gr.top_block, Qt.QWidget):
         self.connect((self.agc, 0), (self.fll, 0))
         self.connect((self.fll, 0), (self.clock_sync, 0))
         self.connect((self.clock_sync, 0), (self.costas, 0))
-        self.connect((self.costas, 0), (self.qtgui_const_sink_x_0, 0))
         self.connect((self.costas, 0), (self.decoder, 0))
         self.connect((self.decoder, 0), (self.diff_dec, 0))
         self.connect((self.diff_dec, 0), (self.corr, 0))
@@ -163,6 +148,7 @@ class caci_rtl_rx(gr.top_block, Qt.QWidget):
     def update_image_display(self, path):
         pixmap = Qt.QPixmap(path)
         if not pixmap.isNull():
+            # Dynamically scale to fit the window size
             scaled = pixmap.scaled(self.image_label.size(), 
                                    Qt.Qt.KeepAspectRatio, 
                                    Qt.Qt.SmoothTransformation)
