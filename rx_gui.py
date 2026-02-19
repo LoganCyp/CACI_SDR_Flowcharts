@@ -6,7 +6,6 @@ import sys
 import signal
 import io
 import pmt
-import sip
 from PyQt5 import Qt
 from PyQt5.QtCore import pyqtSignal, QObject
 from gnuradio import qtgui, analog, blocks, digital, gr, uhd, pdu
@@ -31,7 +30,7 @@ class SignalProxy(QObject):
 # Integrated Image Recovery Block
 ##################################################
 class ImageRecoveryBlock(gr.basic_block):
-    def __init__(self, out_jpg='recovered1.jpg'):
+    def __init__(self, out_jpg='recovered_latest.jpg'):
         gr.basic_block.__init__(self, name="Image Recovery", in_sig=None, out_sig=None)
         self.message_port_register_in(pmt.intern("pdus"))
         self.set_msg_handler(pmt.intern("pdus"), self._handle)
@@ -63,12 +62,12 @@ class ImageRecoveryBlock(gr.basic_block):
             # Clear processed data from buffer
             self.buf = self.buf[e+2:]
         else:
-            # Shift buffer past the false marker to continue searching
+            # Shift buffer past the false marker
             del self.buf[:s+2]
 
     def _valid_jpeg(self, b):
         if len(b) < 100: return False
-        if not HAS_PIL: return True # Fallback if Pillow isn't installed
+        if not HAS_PIL: return True 
         try:
             im = Image.open(io.BytesIO(b))
             im.verify()
@@ -94,25 +93,23 @@ class caci_rtl_rx(gr.top_block, Qt.QWidget):
         # Variables
         self.sps = 4
         self.samp_rate = 1e6
-        self.freq = 2.4e9  # Matches the BPSK transmitter
+        self.freq = 2.4e9  
         self.access_code = '11100001010110101110100010010011'
 
         # GUI Widgets
         self.image_label = Qt.QLabel("Awaiting Image...")
         self.image_label.setAlignment(Qt.Qt.AlignCenter)
         self.image_label.setStyleSheet("""
-            font-size: 24px; 
-            color: #555; 
-            border: 3px dashed #bbb; 
-            background: #f9f9f9;
-            border-radius: 10px;
+            font-size: 24px; color: #555; border: 3px dashed #bbb; 
+            background: #f9f9f9; border-radius: 10px;
         """)
         self.top_grid_layout.addWidget(self.image_label, 0, 0)
 
+        # Constellation Sink - Replaced sip.wrapinstance with pyqwidget()
         self.qtgui_const_sink_x_0 = qtgui.const_sink_c(1024, "Receiver Constellation", 1)
         self.qtgui_const_sink_x_0.set_update_time(0.10)
-        self._const_win = sip.wrapinstance(self.qtgui_const_sink_x_0.qwidget(), Qt.QWidget)
-        self.top_grid_layout.addWidget(self._const_win, 0, 1)
+        self.container = self.qtgui_const_sink_x_0.pyqwidget()
+        self.top_grid_layout.addWidget(self.container, 0, 1)
 
         ##################################################
         # Blocks
@@ -137,10 +134,7 @@ class caci_rtl_rx(gr.top_block, Qt.QWidget):
         self.crc = digital.crc32_bb(True, "packet_len", True)
         self.ts_to_pdu = pdu.tagged_stream_to_pdu(gr.types.byte_t, 'packet_len')
         
-        # Instantiate our integrated recovery block
-        self.recovery_block = ImageRecoveryBlock(out_jpg='recovered_latest.jpg')
-
-        # Connect the signal for thread-safe UI updates
+        self.recovery_block = ImageRecoveryBlock()
         self.recovery_block.proxy.image_received.connect(self.update_image_display)
 
         ##################################################
@@ -162,7 +156,6 @@ class caci_rtl_rx(gr.top_block, Qt.QWidget):
     def update_image_display(self, path):
         pixmap = Qt.QPixmap(path)
         if not pixmap.isNull():
-            # Scale to fit while maintaining quality
             scaled = pixmap.scaled(self.image_label.size(), 
                                    Qt.Qt.KeepAspectRatio, 
                                    Qt.Qt.SmoothTransformation)
