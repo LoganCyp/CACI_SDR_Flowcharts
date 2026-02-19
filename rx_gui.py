@@ -10,6 +10,9 @@ from PyQt5 import Qt
 from PyQt5.QtCore import pyqtSignal, QObject
 from gnuradio import qtgui, analog, blocks, digital, gr, uhd, pdu
 
+# Import sip from PyQt5 specifically to handle the C++ to Python conversion
+from PyQt5 import sip
+
 # Attempt to import PIL for image validation
 try:
     from PIL import Image
@@ -20,15 +23,9 @@ except ImportError:
 JPEG_START = b"\xFF\xD8"
 JPEG_END   = b"\xFF\xD9"
 
-##################################################
-# Helper Class for Thread-Safe UI Updates
-##################################################
 class SignalProxy(QObject):
     image_received = pyqtSignal(str)
 
-##################################################
-# Integrated Image Recovery Block
-##################################################
 class ImageRecoveryBlock(gr.basic_block):
     def __init__(self, out_jpg='recovered_latest.jpg'):
         gr.basic_block.__init__(self, name="Image Recovery", in_sig=None, out_sig=None)
@@ -40,12 +37,10 @@ class ImageRecoveryBlock(gr.basic_block):
         self.proxy = SignalProxy()
 
     def _handle(self, msg):
-        # Extract data from PDU
         vec = pmt.cdr(msg)
         data = bytes(pmt.u8vector_elements(vec))
         self.buf.extend(data)
 
-        # Search for JPEG markers
         s = self.buf.find(JPEG_START)
         if s < 0: return
         e = self.buf.find(JPEG_END, s)
@@ -53,16 +48,12 @@ class ImageRecoveryBlock(gr.basic_block):
 
         jpg = bytes(self.buf[s:e+2])
 
-        # Validate and save if correct
         if self._valid_jpeg(jpg):
             with open(self.out_jpg, "wb") as f:
                 f.write(jpg)
-            # Notify the GUI thread
             self.proxy.image_received.emit(self.out_jpg)
-            # Clear processed data from buffer
             self.buf = self.buf[e+2:]
         else:
-            # Shift buffer past the false marker
             del self.buf[:s+2]
 
     def _valid_jpeg(self, b):
@@ -75,9 +66,6 @@ class ImageRecoveryBlock(gr.basic_block):
         except:
             return False
 
-##################################################
-# Main GUI and Flowgraph Class
-##################################################
 class caci_rtl_rx(gr.top_block, Qt.QWidget):
     def __init__(self):
         gr.top_block.__init__(self, "SDR Image Receiver", catch_exceptions=True)
@@ -85,18 +73,15 @@ class caci_rtl_rx(gr.top_block, Qt.QWidget):
         self.setWindowTitle("SDR Image Receiver - Continuous Mode")
         self.resize(1100, 600)
 
-        # Layout
         self.top_layout = Qt.QVBoxLayout(self)
         self.top_grid_layout = Qt.QGridLayout()
         self.top_layout.addLayout(self.top_grid_layout)
 
-        # Variables
         self.sps = 4
         self.samp_rate = 1e6
-        self.freq = 2.4e9  
+        self.freq = 2.4e9
         self.access_code = '11100001010110101110100010010011'
 
-        # GUI Widgets
         self.image_label = Qt.QLabel("Awaiting Image...")
         self.image_label.setAlignment(Qt.Qt.AlignCenter)
         self.image_label.setStyleSheet("""
@@ -105,15 +90,14 @@ class caci_rtl_rx(gr.top_block, Qt.QWidget):
         """)
         self.top_grid_layout.addWidget(self.image_label, 0, 0)
 
-        # Constellation Sink - Replaced sip.wrapinstance with pyqwidget()
+        # Corrected: use qwidget() and wrap it using sip from PyQt5
         self.qtgui_const_sink_x_0 = qtgui.const_sink_c(1024, "Receiver Constellation", 1)
         self.qtgui_const_sink_x_0.set_update_time(0.10)
-        self.container = self.qtgui_const_sink_x_0.pyqwidget()
-        self.top_grid_layout.addWidget(self.container, 0, 1)
+        
+        # This part ensures the C++ widget is correctly interpreted by PyQt5
+        self.const_widget = sip.wrapinstance(self.qtgui_const_sink_x_0.qwidget(), Qt.QWidget)
+        self.top_grid_layout.addWidget(self.const_widget, 0, 1)
 
-        ##################################################
-        # Blocks
-        ##################################################
         self.uhd_source = uhd.usrp_source(
             ",".join(("", '')),
             uhd.stream_args(cpu_format="fc32", args='', channels=list(range(0,1))),
@@ -137,9 +121,6 @@ class caci_rtl_rx(gr.top_block, Qt.QWidget):
         self.recovery_block = ImageRecoveryBlock()
         self.recovery_block.proxy.image_received.connect(self.update_image_display)
 
-        ##################################################
-        # Connections
-        ##################################################
         self.connect((self.uhd_source, 0), (self.agc, 0))
         self.connect((self.agc, 0), (self.fll, 0))
         self.connect((self.fll, 0), (self.clock_sync, 0))
