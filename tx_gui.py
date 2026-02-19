@@ -2,15 +2,10 @@
 # -*- coding: utf-8 -*-
 
 from PyQt5 import Qt
-from gnuradio import qtgui
-from gnuradio import blocks
+from gnuradio import qtgui, blocks, digital, gr, uhd
 import pmt
-from gnuradio import digital
-from gnuradio import gr
 import sys
 import signal
-from gnuradio import uhd
-import os
 
 class RX_Test(gr.top_block, Qt.QWidget):
 
@@ -18,46 +13,42 @@ class RX_Test(gr.top_block, Qt.QWidget):
         gr.top_block.__init__(self, "SDR Image Transmitter", catch_exceptions=True)
         Qt.QWidget.__init__(self)
         self.setWindowTitle("SDR Image Transmitter")
-        qtgui.util.check_set_qss()
         
-        self.top_layout = Qt.QVBoxLayout(self)
-        self.top_grid_layout = Qt.QGridLayout()
-        self.top_layout.addLayout(self.top_grid_layout)
+        # Main Layout
+        self.layout = Qt.QVBoxLayout(self)
+        self.grid = Qt.QGridLayout()
+        self.layout.addLayout(self.grid)
 
         ##################################################
-        # Variables
+        # Parameters
         ##################################################
         self.sps = 4
         self.samp_rate = 1e6
         self.excess_bw = 0.35
         self.access_code = '11100001010110101110100010010011'
-        
-        # New GUI-controlled variables
         self.image_path = "/home/sdr_caci1/Desktop/Test_Images/cameraman.jpg"
-        self.mod_type = "BPSK" # Default
 
         ##################################################
-        # GUI Widgets
+        # Custom GUI Widgets
         ##################################################
         
-        # 1. Modulation Chooser
-        self._mod_type_options = ("BPSK", "QPSK")
-        self._mod_type_widget = qtgui.chooser_combobox(
-            label="Modulation",
-            dest=self.set_mod_type,
-            choices=self._mod_type_options,
-            type=str,
-            num_opts=len(self._mod_type_options)
-        )
-        self.top_grid_layout.addWidget(self._mod_type_widget, 0, 0)
+        # 1. Modulation Dropdown (BPSK / QPSK)
+        self.mod_label = Qt.QLabel("<b>Modulation Type:</b>")
+        self.grid.addWidget(self.mod_label, 0, 0)
+        
+        self.mod_combo = Qt.QComboBox()
+        self.mod_combo.addItems(["BPSK", "QPSK"])
+        self.mod_combo.currentIndexChanged.connect(self.handle_mod_change)
+        self.grid.addWidget(self.mod_combo, 0, 1)
 
-        # 2. File Selection Button
-        self.file_button = Qt.QPushButton("Select Image File")
+        # 2. File Selection
+        self.file_button = Qt.QPushButton("Select Image...")
         self.file_button.clicked.connect(self.open_file_dialog)
-        self.top_grid_layout.addWidget(self.file_button, 0, 1)
+        self.grid.addWidget(self.file_button, 1, 0)
         
-        self.path_label = Qt.QLabel(f"Current File: {self.image_path}")
-        self.top_grid_layout.addWidget(self.path_label, 1, 0, 1, 2)
+        self.path_display = Qt.QLineEdit(self.image_path)
+        self.path_display.setReadOnly(True)
+        self.grid.addWidget(self.path_display, 1, 1)
 
         ##################################################
         # Blocks
@@ -69,16 +60,17 @@ class RX_Test(gr.top_block, Qt.QWidget):
         )
         self.uhd_usrp_sink_0.set_samp_rate(self.samp_rate)
         self.uhd_usrp_sink_0.set_center_freq(915e6, 0)
-        self.uhd_usrp_sink_0.set_antenna("TX/RX", 0)
         self.uhd_usrp_sink_0.set_gain(50, 0)
 
-        self.blocks_file_source_0 = blocks.file_source(gr.sizeof_char*1, self.image_path, True)
+        # File Source (Repeat = True)
+        self.blocks_file_source_0 = blocks.file_source(gr.sizeof_char, self.image_path, True)
         self.blocks_stream_to_tagged_stream_0 = blocks.stream_to_tagged_stream(gr.sizeof_char, 1, 60, "packet_len")
         self.digital_crc32_bb_0 = digital.crc32_bb(False, "packet_len", True)
-        self.digital_protocol_formatter_bb_0 = digital.protocol_formatter_bb(digital.header_format_default(self.access_code, 0), "packet_len")
-        self.blocks_tagged_stream_mux_0 = blocks.tagged_stream_mux(gr.sizeof_char*1, "packet_len", 0)
+        self.digital_protocol_formatter_bb_0 = digital.protocol_formatter_bb(
+            digital.header_format_default(self.access_code, 0), "packet_len")
+        self.blocks_tagged_stream_mux_0 = blocks.tagged_stream_mux(gr.sizeof_char, "packet_len", 0)
         
-        # Initialize Modulator
+        # Modulator
         self.digital_constellation_modulator_0 = digital.generic_mod(
             constellation=digital.constellation_bpsk().base(),
             differential=True,
@@ -103,19 +95,15 @@ class RX_Test(gr.top_block, Qt.QWidget):
     def open_file_dialog(self):
         filename, _ = Qt.QFileDialog.getOpenFileName(self, "Open Image", "", "Images (*.jpg *.png *.jpeg);;All Files (*)")
         if filename:
-            self.set_image_path(filename)
+            self.image_path = filename
+            self.path_display.setText(filename)
+            # This re-opens the file stream with the new path
+            self.blocks_file_source_0.open(self.image_path, True)
 
-    def set_image_path(self, path):
-        self.image_path = path
-        self.path_label.setText(f"Current File: {self.image_path}")
-        self.blocks_file_source_0.open(self.image_path, True)
-
-    def set_mod_type(self, mod):
-        self.mod_type = mod
-        # Update the constellation object inside the existing modulator block
-        if self.mod_type == "BPSK":
+    def handle_mod_change(self, index):
+        if index == 0: # BPSK
             new_const = digital.constellation_bpsk().base()
-        else:
+        else: # QPSK
             new_const = digital.constellation_qpsk().base()
         
         self.digital_constellation_modulator_0.set_constellation(new_const)
