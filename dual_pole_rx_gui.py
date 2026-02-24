@@ -191,4 +191,131 @@ class dual_pole_rx(gr.top_block, Qt.QWidget):
         self.bpsk_gain_slider = Qt.QSlider(Qt.Qt.Horizontal)
         self.bpsk_gain_slider.setRange(0, 90)
         self.bpsk_gain_slider.setValue(self.gain_ch1)
-        self.bpsk_gain_slider.valueChanged
+        self.bpsk_gain_slider.valueChanged.connect(self.set_ch1_gain)
+        self.bpsk_layout.addWidget(self.bpsk_gain_slider)
+        
+        self.main_layout.addWidget(self.bpsk_group)
+
+        # --- SDR Blocks ---
+        self.uhd_usrp_source_0 = uhd.usrp_source(
+            ",".join(("", '')),
+            uhd.stream_args(cpu_format="fc32", args='', channels=list(range(0,2))),
+        )
+        self.uhd_usrp_source_0.set_samp_rate(self.samp_rate)
+        
+        self.uhd_usrp_source_0.set_center_freq(self.freq, 0)
+        self.uhd_usrp_source_0.set_antenna("TX/RX", 0)  
+        self.uhd_usrp_source_0.set_gain(self.gain_ch0, 0)
+        
+        self.uhd_usrp_source_0.set_center_freq(self.freq, 1)
+        self.uhd_usrp_source_0.set_antenna("TX/RX", 1)  
+        self.uhd_usrp_source_0.set_gain(self.gain_ch1, 1)
+
+        self.agc_0 = analog.agc_cc(1e-4, 1.0, 1.0, 4000)
+        self.agc_1 = analog.agc_cc(1e-4, 1.0, 1.0, 4000)
+        
+        self.fll_0 = digital.fll_band_edge_cc(self.sps, self.excess_bw, 45, 0.05)
+        self.fll_1 = digital.fll_band_edge_cc(self.sps, self.excess_bw, 44, 0.0628)
+        
+        rrc_taps = firdes.root_raised_cosine(32, 32, 1.0, self.excess_bw, 11*32)
+        self.sync_0 = digital.pfb_clock_sync_ccf(self.sps, 0.0628, rrc_taps, 32, 16, 1.5, 2)
+        self.sync_1 = digital.pfb_clock_sync_ccf(self.sps, 0.0628, rrc_taps, 32, 16, 1.5, 1)
+
+        self.mimo_eq = mimo_cma_2x2()
+
+        self.decoder_qpsk = digital.constellation_decoder_cb(digital.constellation_qpsk().base())
+        self.diff_qpsk = digital.diff_decoder_bb(4, digital.DIFF_DIFFERENTIAL)
+        self.unpack_qpsk = blocks.unpack_k_bits_bb(2)
+        self.corr_qpsk = digital.correlate_access_code_bb_ts(self.qpsk_access_code, 6, "packet_len")
+        self.repack_qpsk = blocks.repack_bits_bb(1, 8, "packet_len", True, gr.GR_MSB_FIRST)
+        self.crc_qpsk = digital.crc32_bb(True, "packet_len", True)
+        self.pdu_qpsk = pdu.tagged_stream_to_pdu(gr.types.byte_t, 'packet_len')
+        self.rec_qpsk = ImageRecoveryBlock(out_jpg='qpsk_recovered.jpg')
+
+        self.decoder_bpsk = digital.constellation_decoder_cb(digital.constellation_bpsk().base())
+        self.diff_bpsk = digital.diff_decoder_bb(2, digital.DIFF_DIFFERENTIAL)
+        self.corr_bpsk = digital.correlate_access_code_bb_ts(self.bpsk_access_code, 1, "packet_len")
+        self.repack_bpsk = blocks.repack_bits_bb(1, 8, "packet_len", True, gr.GR_MSB_FIRST)
+        self.crc_bpsk = digital.crc32_bb(True, "packet_len", True)
+        self.pdu_bpsk = pdu.tagged_stream_to_pdu(gr.types.byte_t, 'packet_len')
+        self.rec_bpsk = ImageRecoveryBlock(out_jpg='bpsk_recovered.jpg')
+
+        self.rec_qpsk.proxy.image_received.connect(self.update_qpsk_image)
+        self.rec_bpsk.proxy.image_received.connect(self.update_bpsk_image)
+
+        # --- Connections ---
+        self.connect((self.uhd_usrp_source_0, 0), (self.agc_0, 0))
+        self.connect((self.uhd_usrp_source_0, 1), (self.agc_1, 0))
+        
+        self.connect((self.agc_0, 0), (self.fll_0, 0))
+        self.connect((self.agc_1, 0), (self.fll_1, 0))
+        
+        self.connect((self.fll_0, 0), (self.sync_0, 0))
+        self.connect((self.fll_1, 0), (self.sync_1, 0))
+        
+        self.connect((self.sync_0, 0), (self.mimo_eq, 0))
+        self.connect((self.sync_1, 0), (self.mimo_eq, 1))
+
+        self.connect((self.mimo_eq, 0), (self.decoder_qpsk, 0))
+        self.connect((self.decoder_qpsk, 0), (self.diff_qpsk, 0))
+        self.connect((self.diff_qpsk, 0), (self.unpack_qpsk, 0))
+        self.connect((self.unpack_qpsk, 0), (self.corr_qpsk, 0))
+        self.connect((self.corr_qpsk, 0), (self.repack_qpsk, 0))
+        self.connect((self.repack_qpsk, 0), (self.crc_qpsk, 0))
+        self.connect((self.crc_qpsk, 0), (self.pdu_qpsk, 0))
+        self.msg_connect((self.pdu_qpsk, 'pdus'), (self.rec_qpsk, 'pdus'))
+
+        self.connect((self.mimo_eq, 1), (self.decoder_bpsk, 0))
+        self.connect((self.decoder_bpsk, 0), (self.diff_bpsk, 0))
+        self.connect((self.diff_bpsk, 0), (self.corr_bpsk, 0))
+        self.connect((self.corr_bpsk, 0), (self.repack_bpsk, 0))
+        self.connect((self.repack_bpsk, 0), (self.crc_bpsk, 0))
+        self.connect((self.crc_bpsk, 0), (self.pdu_bpsk, 0))
+        self.msg_connect((self.pdu_bpsk, 'pdus'), (self.rec_bpsk, 'pdus'))
+
+    def set_ch0_gain(self, value):
+        self.gain_ch0 = value
+        self.qpsk_gain_label.setText(f"<b>RX 0 Gain:</b> {self.gain_ch0} dB")
+        self.uhd_usrp_source_0.set_gain(self.gain_ch0, 0)
+
+    def set_ch1_gain(self, value):
+        self.gain_ch1 = value
+        self.bpsk_gain_label.setText(f"<b>RX 1 Gain:</b> {self.gain_ch1} dB")
+        self.uhd_usrp_source_0.set_gain(self.gain_ch1, 1)
+
+    def update_qpsk_image(self, path):
+        pixmap = Qt.QPixmap(path)
+        if not pixmap.isNull():
+            scaled = pixmap.scaled(self.qpsk_image_label.size(), Qt.Qt.KeepAspectRatio, Qt.Qt.SmoothTransformation)
+            self.qpsk_image_label.setPixmap(scaled)
+            self.qpsk_image_label.setStyleSheet("border: none; background: transparent;")
+
+    def update_bpsk_image(self, path):
+        pixmap = Qt.QPixmap(path)
+        if not pixmap.isNull():
+            scaled = pixmap.scaled(self.bpsk_image_label.size(), Qt.Qt.KeepAspectRatio, Qt.Qt.SmoothTransformation)
+            self.bpsk_image_label.setPixmap(scaled)
+            self.bpsk_image_label.setStyleSheet("border: none; background: transparent;")
+
+    def closeEvent(self, event):
+        self.stop()
+        self.wait()
+        event.accept()
+
+def main():
+    qapp = Qt.QApplication(sys.argv)
+    tb = dual_pole_rx()
+    tb.start()
+    tb.show()
+
+    def sig_handler(sig=None, frame=None):
+        tb.stop()
+        tb.wait()
+        Qt.QApplication.quit()
+
+    signal.signal(signal.SIGINT, sig_handler)
+    signal.signal(signal.SIGTERM, sig_handler)
+    qapp.exec_()
+
+if __name__ == '__main__':
+    main()
