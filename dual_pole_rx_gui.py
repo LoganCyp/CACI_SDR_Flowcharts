@@ -9,7 +9,7 @@ import numpy as np
 import pmt
 from PyQt5 import Qt
 from PyQt5.QtCore import pyqtSignal, QObject
-from gnuradio import qtgui, analog, blocks, digital, gr, uhd, pdu
+from gnuradio import analog, blocks, digital, gr, uhd, pdu
 from gnuradio.filter import firdes
 
 # Attempt to import PIL for image validation
@@ -29,7 +29,7 @@ class SignalProxy(QObject):
     image_received = pyqtSignal(str)
 
 ##################################################
-# 2. Continuous Image Recovery Block (Used for both)
+# 2. Continuous Image Recovery Block
 ##################################################
 class ImageRecoveryBlock(gr.basic_block):
     def __init__(self, out_jpg='recovered_latest.jpg'):
@@ -75,11 +75,6 @@ class ImageRecoveryBlock(gr.basic_block):
 # 3. MIMO CMA 2x2 Equalizer Block
 ##################################################
 class mimo_cma_2x2(gr.sync_block):
-    """
-    2x2 MIMO CMA Equalizer for Cross-Polarization Cancellation.
-    Inputs:  [in0 (Vertical), in1 (Horizontal)]
-    Outputs: [out0 (Clean QPSK), out1 (Clean BPSK)]
-    """
     def __init__(self, mu=0.001, taps=1):
         gr.sync_block.__init__(self,
             name="MIMO CMA XPIC",
@@ -116,10 +111,9 @@ class dual_pole_rx(gr.top_block, Qt.QWidget):
     def __init__(self):
         gr.top_block.__init__(self, "Dual-Pole Rx System", catch_exceptions=True)
         Qt.QWidget.__init__(self)
-        self.setWindowTitle("Dual-Pole SDR Receiver (QPSK & BPSK)")
+        self.setWindowTitle("Dual-Pole SDR Receiver (2.4 GHz MIMO)")
         self.resize(1200, 600)
 
-        # Main Layout: Side-by-side columns
         self.main_layout = Qt.QHBoxLayout(self)
 
         ##################################################
@@ -127,8 +121,9 @@ class dual_pole_rx(gr.top_block, Qt.QWidget):
         ##################################################
         self.sps = 4
         self.samp_rate = 1e6
-        self.freq = 2.4e9  # Set to 2.4GHz to match TX
         self.excess_bw = 0.35
+        self.freq = 2.4e9  # Both channels at 2.4 GHz
+        
         self.qpsk_access_code = '10010110110110100101000111011001'
         self.bpsk_access_code = '11100001010110101110100010010011'
         
@@ -140,7 +135,7 @@ class dual_pole_rx(gr.top_block, Qt.QWidget):
         ##################################################
         
         # --- Channel 0: QPSK UI ---
-        self.qpsk_group = Qt.QGroupBox("Channel 0: QPSK Receiver")
+        self.qpsk_group = Qt.QGroupBox(f"Channel 0: QPSK Receiver ({self.freq/1e9} GHz)")
         self.qpsk_layout = Qt.QVBoxLayout()
         self.qpsk_group.setLayout(self.qpsk_layout)
         
@@ -161,7 +156,7 @@ class dual_pole_rx(gr.top_block, Qt.QWidget):
         self.main_layout.addWidget(self.qpsk_group)
 
         # --- Channel 1: BPSK UI ---
-        self.bpsk_group = Qt.QGroupBox("Channel 1: BPSK Receiver")
+        self.bpsk_group = Qt.QGroupBox(f"Channel 1: BPSK Receiver ({self.freq/1e9} GHz)")
         self.bpsk_layout = Qt.QVBoxLayout()
         self.bpsk_group.setLayout(self.bpsk_layout)
         
@@ -192,14 +187,14 @@ class dual_pole_rx(gr.top_block, Qt.QWidget):
         )
         self.uhd_usrp_source_0.set_samp_rate(self.samp_rate)
         
-        # Config Ch 0 (QPSK expected)
+        # Config Ch 0 (QPSK @ 2.4 GHz, TX/RX port)
         self.uhd_usrp_source_0.set_center_freq(self.freq, 0)
-        self.uhd_usrp_source_0.set_antenna("RX2", 0)
+        self.uhd_usrp_source_0.set_antenna("TX/RX", 0)  
         self.uhd_usrp_source_0.set_gain(self.gain_ch0, 0)
         
-        # Config Ch 1 (BPSK expected)
+        # Config Ch 1 (BPSK @ 2.4 GHz, TX/RX port)
         self.uhd_usrp_source_0.set_center_freq(self.freq, 1)
-        self.uhd_usrp_source_0.set_antenna("RX2", 1)
+        self.uhd_usrp_source_0.set_antenna("TX/RX", 1)  
         self.uhd_usrp_source_0.set_gain(self.gain_ch1, 1)
 
         # 2. Pre-Processing (AGC, FLL, Sync)
@@ -214,7 +209,6 @@ class dual_pole_rx(gr.top_block, Qt.QWidget):
         self.sync_1 = digital.pfb_clock_sync_ccf(self.sps, 0.0628, rrc_taps, 32, 16, 1.5, 1)
 
         # 3. MIMO Equalizer
-        # Syntax fix applied here (added defaults for mu and taps)
         self.mimo_eq = mimo_cma_2x2(mu=0.001, taps=1)
 
         # 4. Decoding QPSK (Path 0)
@@ -243,19 +237,15 @@ class dual_pole_rx(gr.top_block, Qt.QWidget):
         ##################################################
         # Connections
         ##################################################
-        # Source to AGC
         self.connect((self.uhd_usrp_source_0, 0), (self.agc_0, 0))
         self.connect((self.uhd_usrp_source_0, 1), (self.agc_1, 0))
         
-        # AGC to FLL
         self.connect((self.agc_0, 0), (self.fll_0, 0))
         self.connect((self.agc_1, 0), (self.fll_1, 0))
         
-        # FLL to Sync
         self.connect((self.fll_0, 0), (self.sync_0, 0))
         self.connect((self.fll_1, 0), (self.sync_1, 0))
         
-        # Sync to MIMO EQ
         self.connect((self.sync_0, 0), (self.mimo_eq, 0))
         self.connect((self.sync_1, 0), (self.mimo_eq, 1))
 
