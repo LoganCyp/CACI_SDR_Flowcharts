@@ -21,9 +21,15 @@ except ImportError:
 JPEG_START = b"\xFF\xD8"
 JPEG_END   = b"\xFF\xD9"
 
+# SAFETY CATCH: Prevents the CPU from crashing due to infinite noise search
+MAX_BUF_SIZE = 500_000  
+
 class SignalProxy(QObject):
     image_received = pyqtSignal(str)
 
+##################################################
+# 1. CPU-Safe Image Recovery Block
+##################################################
 class ImageRecoveryBlock(gr.basic_block):
     def __init__(self, out_jpg='recovered_latest.jpg'):
         gr.basic_block.__init__(self, name="Image Recovery", in_sig=None, out_sig=None)
@@ -36,8 +42,11 @@ class ImageRecoveryBlock(gr.basic_block):
 
     def _handle(self, msg):
         vec = pmt.cdr(msg)
-        data = bytes(pmt.u8vector_elements(vec))
-        self.buf.extend(data)
+        self.buf.extend(bytes(pmt.u8vector_elements(vec)))
+
+        # Flush buffer if it gets too large from static
+        if len(self.buf) > MAX_BUF_SIZE:
+            self.buf = self.buf[-MAX_BUF_SIZE:]
 
         s = self.buf.find(JPEG_START)
         if s < 0: return
@@ -65,7 +74,7 @@ class ImageRecoveryBlock(gr.basic_block):
             return False
 
 ##################################################
-# CPU-Optimized MIMO Equalizer
+# 2. Unrolled Python MIMO Equalizer
 ##################################################
 class mimo_cma_2x2(gr.sync_block):
     def __init__(self, mu=1e-4):
@@ -75,7 +84,7 @@ class mimo_cma_2x2(gr.sync_block):
             out_sig=[np.complex64, np.complex64])
         
         self.mu = mu
-        # Store weights as raw scalars instead of an array to prevent overhead
+        # Unrolled matrix to avoid slow numpy array creation in the loop
         self.w00 = 1.0 + 0j
         self.w01 = 0.0 + 0j
         self.w10 = 0.0 + 0j
@@ -85,68 +94,62 @@ class mimo_cma_2x2(gr.sync_block):
         in0, in1 = input_items[0], input_items[1]
         out0, out1 = output_items[0], output_items[1]
         
-        # Load state into ultra-fast local variables
         mu = self.mu
         w00, w01, w10, w11 = self.w00, self.w01, self.w10, self.w11
-        
         n_samples = len(in0)
         
         for i in range(n_samples):
             x0 = in0[i]
             x1 = in1[i]
             
-            # 1. Unrolled Dot Product (Mixing)
             y0 = w00 * x0 + w01 * x1
             y1 = w10 * x0 + w11 * x1
             
             out0[i] = y0
             out1[i] = y1
             
-            # 2. Fast Magnitude Squared calculation (avoids np.abs overhead)
             mag_sq0 = y0.real**2 + y0.imag**2
             mag_sq1 = y1.real**2 + y1.imag**2
             
-            # 3. Fast Safety Catch (mag_sq0 != mag_sq0 checks for NaN natively)
+            # Safety catch for math explosions
             if mag_sq0 > 10.0 or mag_sq1 > 10.0 or mag_sq0 != mag_sq0:
                 w00, w01 = 1.0+0j, 0.0+0j
                 w10, w11 = 0.0+0j, 1.0+0j
                 continue
             
-            # 4. Error Calculation
             err0 = y0 * (mag_sq0 - 1.0)
             err1 = y1 * (mag_sq1 - 1.0)
             
-            # 5. Conjugate x
             x0_c = x0.conjugate()
             x1_c = x1.conjugate()
             
-            # 6. Unrolled Update (avoids np.outer overhead)
             w00 -= mu * err0 * x0_c
             w01 -= mu * err0 * x1_c
             w10 -= mu * err1 * x0_c
             w11 -= mu * err1 * x1_c
 
-        # Save state for the next chunk of samples
         self.w00, self.w01, self.w10, self.w11 = w00, w01, w10, w11
-        
         return n_samples
 
 ##################################################
-# Main GUI
+# 3. Main GUI and Flowgraph
 ##################################################
 class dual_pole_rx(gr.top_block, Qt.QWidget):
     def __init__(self):
         gr.top_block.__init__(self, "Dual-Pole Rx System", catch_exceptions=True)
         Qt.QWidget.__init__(self)
-        self.setWindowTitle("Dual-Pole SDR Receiver (2.4 GHz MIMO)")
+        self.setWindowTitle("Dual-Pole SDR Receiver (Optimized Python MIMO)")
         self.resize(1200, 600)
 
         self.main_layout = Qt.QHBoxLayout(self)
 
+        ##################################################
+        # Variables
+        ##################################################
         self.sps = 4
-        self.samp_rate = 100e3  # LOWERED TO 100 ksps
+        self.samp_rate = 100e3  # 100 ksps to ensure stability for pure Python
         self.freq = 2.4e9  
-        self.excess_bw = 0.35  
+        self.excess_bw = 0.35 
         
         self.qpsk_access_code = '10010110110110100101000111011001'
         self.bpsk_access_code = '11100001010110101110100010010011'
@@ -154,6 +157,10 @@ class dual_pole_rx(gr.top_block, Qt.QWidget):
         self.gain_ch0 = 30
         self.gain_ch1 = 30
 
+        ##################################################
+        # GUI Setup
+        ##################################################
+        
         # --- Channel 0: QPSK UI ---
         self.qpsk_group = Qt.QGroupBox(f"Channel 0: QPSK Receiver ({self.freq/1e9} GHz)")
         self.qpsk_layout = Qt.QVBoxLayout()
@@ -196,9 +203,13 @@ class dual_pole_rx(gr.top_block, Qt.QWidget):
         
         self.main_layout.addWidget(self.bpsk_group)
 
-        # --- SDR Blocks ---
+        ##################################################
+        # SDR Blocks & Processing
+        ##################################################
+        
+        # Extended hardware buffer
         self.uhd_usrp_source_0 = uhd.usrp_source(
-            ",".join(("", '')),
+            ",".join(("", 'num_recv_frames=128')),
             uhd.stream_args(cpu_format="fc32", args='', channels=list(range(0,2))),
         )
         self.uhd_usrp_source_0.set_samp_rate(self.samp_rate)
@@ -221,7 +232,12 @@ class dual_pole_rx(gr.top_block, Qt.QWidget):
         self.sync_0 = digital.pfb_clock_sync_ccf(self.sps, 0.0628, rrc_taps, 32, 16, 1.5, 2)
         self.sync_1 = digital.pfb_clock_sync_ccf(self.sps, 0.0628, rrc_taps, 32, 16, 1.5, 1)
 
+        # MIMO EQUALIZER INJECTED HERE
         self.mimo_eq = mimo_cma_2x2()
+
+        # Costas Loops lock the phase after MIMO
+        self.costas_0 = digital.costas_loop_cc(0.05, 4, False) # QPSK loop
+        self.costas_1 = digital.costas_loop_cc(0.05, 2, False) # BPSK loop
 
         self.decoder_qpsk = digital.constellation_decoder_cb(digital.constellation_qpsk().base())
         self.diff_qpsk = digital.diff_decoder_bb(4, digital.DIFF_DIFFERENTIAL)
@@ -243,7 +259,9 @@ class dual_pole_rx(gr.top_block, Qt.QWidget):
         self.rec_qpsk.proxy.image_received.connect(self.update_qpsk_image)
         self.rec_bpsk.proxy.image_received.connect(self.update_bpsk_image)
 
-        # --- Connections ---
+        ##################################################
+        # Connections
+        ##################################################
         self.connect((self.uhd_usrp_source_0, 0), (self.agc_0, 0))
         self.connect((self.uhd_usrp_source_0, 1), (self.agc_1, 0))
         
@@ -253,10 +271,16 @@ class dual_pole_rx(gr.top_block, Qt.QWidget):
         self.connect((self.fll_0, 0), (self.sync_0, 0))
         self.connect((self.fll_1, 0), (self.sync_1, 0))
         
+        # Sync -> MIMO XPIC Equalizer
         self.connect((self.sync_0, 0), (self.mimo_eq, 0))
         self.connect((self.sync_1, 0), (self.mimo_eq, 1))
 
-        self.connect((self.mimo_eq, 0), (self.decoder_qpsk, 0))
+        # MIMO Output -> Costas Loops (Phase Lock)
+        self.connect((self.mimo_eq, 0), (self.costas_0, 0))
+        self.connect((self.mimo_eq, 1), (self.costas_1, 0))
+
+        # --- QPSK Path (0) ---
+        self.connect((self.costas_0, 0), (self.decoder_qpsk, 0))
         self.connect((self.decoder_qpsk, 0), (self.diff_qpsk, 0))
         self.connect((self.diff_qpsk, 0), (self.unpack_qpsk, 0))
         self.connect((self.unpack_qpsk, 0), (self.corr_qpsk, 0))
@@ -265,7 +289,8 @@ class dual_pole_rx(gr.top_block, Qt.QWidget):
         self.connect((self.crc_qpsk, 0), (self.pdu_qpsk, 0))
         self.msg_connect((self.pdu_qpsk, 'pdus'), (self.rec_qpsk, 'pdus'))
 
-        self.connect((self.mimo_eq, 1), (self.decoder_bpsk, 0))
+        # --- BPSK Path (1) ---
+        self.connect((self.costas_1, 0), (self.decoder_bpsk, 0))
         self.connect((self.decoder_bpsk, 0), (self.diff_bpsk, 0))
         self.connect((self.diff_bpsk, 0), (self.corr_bpsk, 0))
         self.connect((self.corr_bpsk, 0), (self.repack_bpsk, 0))
