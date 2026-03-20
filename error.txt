@@ -1,0 +1,3 @@
+    1. gnuradio.digital.digital_python.linear_equalizer(num_taps: int, sps: int, alg: gnuradio.digital.digital_python.adaptive_algorithm, adapt_after_training: bool = True, training_sequence: List[complex] = [], training_start_tag: str = '')
+
+Invoked with: kwargs: num_taps=15, input_sps=1, adaptive_alg=<gnuradio.digital.digital_python.adaptive_algorithm_cma object at 0x7095d7405bf0>, adapt_after_training=True, training_sequence=[], training_start_tag='corr_est', sps=1, taps=[0j, 0j, 0j, 0j, 0j, 0j, 0j, (1+0j), 0j, 0j, 0j, 0j, 0j, 0j, 0j]
