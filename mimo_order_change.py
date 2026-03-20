@@ -78,78 +78,87 @@ class ImageRecoveryBlock(gr.basic_block):
 # 2. NUMBA-Compiled MIMO Equalizer Math
 ##################################################
 # This runs completely outside the Python interpreter at near-C++ speeds
-@nb.jit(nopython=True, fastmath=True, nogil=True)
-def numba_fast_cma(in0, in1, out0, out1, mu, w00, w01, w10, w11):
-    n_samples = len(in0)
-    
-    for i in range(n_samples):
+@nb.jit(nopython=True, fastmath=True, nogil=True, cache=True)
+def numba_cma_xpic(in0, in1, out0, out1, mu, rho, w00, w01, w10, w11):
+    n = in0.shape[0]
+
+    for i in range(n):
         x0 = in0[i]
         x1 = in1[i]
-        
-        # Matrix mixing
+
         y0 = w00 * x0 + w01 * x1
         y1 = w10 * x0 + w11 * x1
-        
+
         out0[i] = y0
         out1[i] = y1
-        
-        # Fast Magnitude Squared
-        mag_sq0 = y0.real**2 + y0.imag**2
-        mag_sq1 = y1.real**2 + y1.imag**2
-        
-        # Safety catch for math explosions
-        if mag_sq0 > 10.0 or mag_sq1 > 10.0 or np.isnan(mag_sq0) or np.isnan(mag_sq1):
-            w00, w01 = 1.0+0j, 0.0+0j
-            w10, w11 = 0.0+0j, 1.0+0j
+
+        mag_sq0 = y0.real * y0.real + y0.imag * y0.imag
+        mag_sq1 = y1.real * y1.real + y1.imag * y1.imag
+
+        if mag_sq0 > 10.0 or mag_sq1 > 10.0:
+            w00 = 1.0 + 0j
+            w01 = 0.0 + 0j
+            w10 = 0.0 + 0j
+            w11 = 1.0 + 0j
             continue
-        
+
         err0 = y0 * (mag_sq0 - 1.0)
         err1 = y1 * (mag_sq1 - 1.0)
-        
-        x0_c = x0.conjugate()
-        x1_c = x1.conjugate()
-        
-        # Weights update
-        w00 -= mu * err0 * x0_c
-        w01 -= mu * err0 * x1_c
-        w10 -= mu * err1 * x0_c
-        w11 -= mu * err1 * x1_c
-        
+
+        cross = y0 * y1.conjugate()
+        err0 += rho * y1 * cross.conjugate()
+        err1 += rho * y0 * cross
+
+        x0c = x0.conjugate()
+        x1c = x1.conjugate()
+
+        w00 -= mu * err0 * x0c
+        w01 -= mu * err0 * x1c
+        w10 -= mu * err1 * x0c
+        w11 -= mu * err1 * x1c
+
     return w00, w01, w10, w11
 
-class mimo_cma_2x2(gr.sync_block):
-    def __init__(self, mu=1e-4):
+
+class mimo_xpic_2x2(gr.sync_block):
+
+    def __init__(self, mu=1e-4, rho=0.05):
         gr.sync_block.__init__(self,
-            name="MIMO CMA XPIC",
+            name="MIMO XPIC 2x2",
             in_sig=[np.complex64, np.complex64],
             out_sig=[np.complex64, np.complex64])
-        
+
         self.mu = mu
+        self.rho = rho
         self.w00 = 1.0 + 0j
         self.w01 = 0.0 + 0j
         self.w10 = 0.0 + 0j
         self.w11 = 1.0 + 0j
 
-        # Warm up Numba so it compiles BEFORE the USRP streams data
-        _dummy_in = np.zeros(1, dtype=np.complex64)
-        _dummy_out = np.zeros(1, dtype=np.complex64)
-        self.w00, self.w01, self.w10, self.w11 = numba_fast_cma(
-            _dummy_in, _dummy_in,
-            _dummy_out, _dummy_out,
-            self.mu,
-            self.w00, self.w01, self.w10, self.w11
-        )
-
     def work(self, input_items, output_items):
-        # Call the pre-compiled JIT function
-        self.w00, self.w01, self.w10, self.w11 = numba_fast_cma(
+        self.w00, self.w01, self.w10, self.w11 = numba_cma_xpic(
             input_items[0], input_items[1],
             output_items[0], output_items[1],
-            self.mu,
+            self.mu, self.rho,
             self.w00, self.w01, self.w10, self.w11
         )
         return len(input_items[0])
 
+    def set_mu(self, mu):
+        self.mu = mu
+
+    def set_rho(self, rho):
+        self.rho = rho
+
+    def get_weights(self):
+        return [[self.w00, self.w01],
+                [self.w10, self.w11]]
+
+    def reset_weights(self):
+        self.w00 = 1.0 + 0j
+        self.w01 = 0.0 + 0j
+        self.w10 = 0.0 + 0j
+        self.w11 = 1.0 + 0j
 ##################################################
 # 3. Main GUI and Flowgraph
 ##################################################
@@ -157,7 +166,7 @@ class dual_pole_rx(gr.top_block, Qt.QWidget):
     def __init__(self):
         gr.top_block.__init__(self, "Dual-Pole Rx System", catch_exceptions=True)
         Qt.QWidget.__init__(self)
-        self.setWindowTitle("Dual-Pole SDR Receiver (Numba Optimized MIMO)")
+        self.setWindowTitle("Dual-Pole SDR Receiver")
         self.resize(1200, 600)
 
         self.main_layout = Qt.QHBoxLayout(self)
@@ -173,8 +182,8 @@ class dual_pole_rx(gr.top_block, Qt.QWidget):
         self.qpsk_access_code = '10010110110110100101000111011001'
         self.bpsk_access_code = '11100001010110101110100010010011'
         
-        self.gain_ch0 = 30
-        self.gain_ch1 = 30
+        self.gain_ch0 = 5
+        self.gain_ch1 = 5
 
         ##################################################
         # GUI Setup
@@ -227,17 +236,17 @@ class dual_pole_rx(gr.top_block, Qt.QWidget):
         ##################################################
         
         self.uhd_usrp_source_0 = uhd.usrp_source(
-            ",".join(("", 'num_recv_frames=128')),
+            ",".join(("", '')),
             uhd.stream_args(cpu_format="fc32", args='', channels=list(range(0,2))),
         )
         self.uhd_usrp_source_0.set_samp_rate(self.samp_rate)
         
         self.uhd_usrp_source_0.set_center_freq(self.freq, 0)
-        self.uhd_usrp_source_0.set_antenna("TX/RX", 0)  
+        self.uhd_usrp_source_0.set_antenna("RX2", 0)  
         self.uhd_usrp_source_0.set_gain(self.gain_ch0, 0)
         
         self.uhd_usrp_source_0.set_center_freq(self.freq, 1)
-        self.uhd_usrp_source_0.set_antenna("TX/RX", 1)  
+        self.uhd_usrp_source_0.set_antenna("RX2", 1)  
         self.uhd_usrp_source_0.set_gain(self.gain_ch1, 1)
 
         self.agc_0 = analog.agc_cc(1e-4, 1.0, 1.0, 4000)
@@ -250,7 +259,7 @@ class dual_pole_rx(gr.top_block, Qt.QWidget):
         self.sync_0 = digital.pfb_clock_sync_ccf(self.sps, 0.0628, rrc_taps, 32, 16, 1.5, 2)
         self.sync_1 = digital.pfb_clock_sync_ccf(self.sps, 0.0628, rrc_taps, 32, 16, 1.5, 1)
 
-        self.mimo_eq = mimo_cma_2x2()
+        self.mimo_eq = mimo_xpic_2x2()
 
         # Costas Loops lock the phase after Clock Syncs
         self.costas_0 = digital.costas_loop_cc(0.05, 4, False) # QPSK loop
@@ -259,7 +268,7 @@ class dual_pole_rx(gr.top_block, Qt.QWidget):
         self.decoder_qpsk = digital.constellation_decoder_cb(digital.constellation_qpsk().base())
         self.diff_qpsk = digital.diff_decoder_bb(4, digital.DIFF_DIFFERENTIAL)
         self.unpack_qpsk = blocks.unpack_k_bits_bb(2)
-        self.corr_qpsk = digital.correlate_access_code_bb_ts(self.qpsk_access_code, 6, "packet_len")
+        self.corr_qpsk = digital.correlate_access_code_bb_ts(self.qpsk_access_code, 1, "packet_len")
         self.repack_qpsk = blocks.repack_bits_bb(1, 8, "packet_len", True, gr.GR_MSB_FIRST)
         self.crc_qpsk = digital.crc32_bb(True, "packet_len", True)
         self.pdu_qpsk = pdu.tagged_stream_to_pdu(gr.types.byte_t, 'packet_len')
