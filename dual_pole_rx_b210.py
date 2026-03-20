@@ -266,50 +266,18 @@ class dual_pole_rx(gr.top_block, Qt.QWidget):
         self.costas_0 = digital.costas_loop_cc(0.05, 4, False) # QPSK loop
         self.costas_1 = digital.costas_loop_cc(0.05, 2, False) # BPSK loop
 
-        # ------------------------------------------------------------------
-        # Linear Equalizer — QPSK path only, inserted AFTER costas_0.
-        #
-        # Placement rationale:
-        #   The signal arrives here at 1 sps with frequency (FLL) and phase
-        #   (Costas) already corrected.  The equalizer therefore only sees
-        #   residual ISI from the channel and any imperfect matched filtering
-        #   — the cleanest operating point for a blind adaptive algorithm.
-        #   Placing it before timing/phase recovery would force CMA to fight
-        #   carrier offset and jitter simultaneously, slowing convergence and
-        #   risking divergence on a weak signal.
-        #
-        # Parameter choices:
-        #   num_taps = 15   — odd number gives a symmetric span of ±7 symbols,
-        #                     enough to capture most multipath spread without
-        #                     excessive complexity or convergence time.
-        #   input_sps = 1   — symbol-rate operation; signal is already at 1 sps
-        #                     after the PFB clock sync and Costas loop.
-        #   CMA step (mu)   — 1e-3 balances convergence speed against residual
-        #                     misadjustment noise for QPSK at moderate SNR.
-        #                     Reduce to 1e-4 for very low-noise channels;
-        #                     increase to 3e-3 for fast-fading environments.
-        #   Centre-tap init — tap[7] = 1+0j, all others zero.  Gives the
-        #                     equalizer an identity response on startup so
-        #                     the constellation is immediately visible and CMA
-        #                     refines from there rather than from a null state.
-        # ------------------------------------------------------------------
-        _leq_taps = [0.0 + 0j] * 15
-        _leq_taps[7] = 1.0 + 0j          # centre-spike initialisation
-
         self.leq_qpsk = digital.linear_equalizer(
             num_taps             = 15,
-            input_sps            = 1,
-            adaptive_alg         = digital.adaptive_algorithm_cma(
+            sps                  = 1,
+            alg                  = digital.adaptive_algorithm_cma(
                                        digital.constellation_qpsk().base(),
                                        1e-3,            # CMA step size μ
+                                       1.0,             # modulus R — QPSK lies on the unit circle
                                    ),
             adapt_after_training = True,
             training_sequence    = [],
-            training_start_tag   = "corr_est",
-            sps                  = 1,
-            taps                 = _leq_taps,
+            training_start_tag   = "",
         )
-        # ------------------------------------------------------------------
 
         self.decoder_qpsk = digital.constellation_decoder_cb(digital.constellation_qpsk().base())
         self.diff_qpsk = digital.diff_decoder_bb(4, digital.DIFF_DIFFERENTIAL)
